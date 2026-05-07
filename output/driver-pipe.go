@@ -1,6 +1,7 @@
 package output
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -9,8 +10,10 @@ import (
 	"os"
 	"sync"
 	"syscall"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
+	"golang.org/x/sync/errgroup"
 )
 
 type pipeOutput struct {
@@ -73,76 +76,119 @@ func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
 	}
 
 	// Open the FIFO for writing as non-blocking to cause an error if there is no reader.
-	out.file, err = os.OpenFile(opts.OutputPipe, os.O_WRONLY|syscall.O_NONBLOCK, 0)
+	out.file, err = os.OpenFile(opts.OutputPipe, os.O_WRONLY, 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open fifo: %w", err)
 	}
+	// syscall.Syscall(syscall.SYS_FCNTL, out.file.Fd(), 1031, uintptr(50*1024*1024))
 
-	// Restore blocking mode now that we are sure we have a reader.
+	// // Restore blocking mode now that we are sure we have a reader.
 	if err := syscall.SetNonblock(int(out.file.Fd()), false); err != nil {
 		return nil, fmt.Errorf("failed to set blocking mode on fifo: %w", err)
 	}
 
-	go out.outputLoop()
+	buffer_chan := make(chan []float32, 5)
+
+	g, ctx := errgroup.WithContext(context.Background())
+	g.Go(func() error {
+		return out.readerLoop(ctx, buffer_chan) // legge da spotify e scrive sul canale
+	})
+
+	g.Go(func() error {
+		return out.outputLoop(ctx, buffer_chan) // legge dal canale e scrive sul pipe i dati per pipewire
+	})
 
 	return out, nil
 }
 
-func (out *pipeOutput) outputLoop() {
-	floats := make([]float32, 4*1024)
-	bytes := make([]byte, 4*len(floats)) // times four is the biggest we can get
+func (out *pipeOutput) readerLoop(ctx context.Context, buff_chan chan []float32) error {
+	floats := make([]float32, 4*1024) // slice di dati da leggere da spotify
 
+	defer out.Close()
 	for {
-		out.lock.Lock()
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			n, err := out.reader.Read(floats)
 
-		for out.paused && !out.closed {
-			out.cond.Wait()
-		}
+			// Apply volume.
+			if !out.externalVolume {
+				// Map volume (in percent) to what is perceived as linear by
+				// humans. This is the same as math.Pow(out.volume, 2) but simpler.
+				volume := out.volume * out.volume
 
-		if out.closed {
-			out.lock.Unlock()
-			break
-		}
+				for i := 0; i < n; i++ {
+					floats[i] *= volume
+				}
+			}
 
-		n, err := out.reader.Read(floats)
+			newBuf := make([]float32, n)
+			copy(newBuf, floats[:n])
+			buff_chan <- newBuf
 
-		// Apply volume.
-		if !out.externalVolume {
-			// Map volume (in percent) to what is perceived as linear by
-			// humans. This is the same as math.Pow(out.volume, 2) but simpler.
-			volume := out.volume * out.volume
-
-			for i := 0; i < n; i++ {
-				floats[i] *= volume
+			if errors.Is(err, io.EOF) {
+				// Reached EOF, move to a "paused" state.
+				time.Sleep(100 * time.Millisecond)
+			} else if err != nil {
+				// Got some other error. Close the output and report the error.
+				out.err <- err
+				out.closed = true
+				return err
 			}
 		}
+	}
+}
 
-		if n > 0 {
-			nn := out.transform(floats[:n], bytes)
+func (out *pipeOutput) outputLoop(ctx context.Context, buff_chan chan []float32) error {
+	bytes := make([]byte, 4*4096) // times four is the biggest we can get
+	tempo := time.NewTicker(46200 * time.Microsecond)
+	defer tempo.Stop()
+	defer out.Close()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+			<-tempo.C
+			out.lock.Lock()
+
+			for out.paused && !out.closed {
+				out.cond.Wait()
+			}
+
+			if out.closed {
+				out.lock.Unlock()
+				ctx.Done()
+				return nil
+			}
+
+			floats := <-buff_chan
+
+			nn := out.transform(floats, bytes)
 			_, err := out.file.Write(bytes[:nn])
 			if err != nil {
 				out.err <- err
 				out.closed = true
 				out.lock.Unlock()
-				break
+				return err
 			}
-		}
 
-		if errors.Is(err, io.EOF) {
-			// Reached EOF, move to a "paused" state.
-			out.paused = true
-		} else if err != nil {
-			// Got some other error. Close the output and report the error.
-			out.err <- err
-			out.closed = true
+			if errors.Is(err, io.EOF) {
+				// Reached EOF, move to a "paused" state.
+				out.paused = true
+			} else if err != nil {
+				// Got some other error. Close the output and report the error.
+				out.err <- err
+				out.closed = true
+				out.lock.Unlock()
+				return err
+			}
+
 			out.lock.Unlock()
-			break
 		}
-
-		out.lock.Unlock()
 	}
-
-	_ = out.Close()
 }
 
 func (out *pipeOutput) Pause() error {
