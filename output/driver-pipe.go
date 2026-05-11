@@ -27,7 +27,7 @@ type pipeOutput struct {
 
 	volume float32
 	paused bool
-	closed bool
+	cancel context.CancelFunc
 
 	volumeUpdate chan float32
 	err          chan error
@@ -89,7 +89,9 @@ func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
 
 	buffer_chan := make(chan []float32, 5)
 
-	g, ctx := errgroup.WithContext(context.Background())
+	var ctx context.Context
+	ctx, out.cancel = context.WithCancel(context.Background())
+	g, ctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
 		return out.readerLoop(ctx, buffer_chan) // legge da spotify e scrive sul canale
 	})
@@ -109,6 +111,7 @@ func (out *pipeOutput) readerLoop(ctx context.Context, buff_chan chan []float32)
 		select {
 		case <-ctx.Done():
 			return nil
+
 		default:
 			n, err := out.reader.Read(floats)
 
@@ -133,7 +136,7 @@ func (out *pipeOutput) readerLoop(ctx context.Context, buff_chan chan []float32)
 			} else if err != nil {
 				// Got some other error. Close the output and report the error.
 				out.err <- err
-				out.closed = true
+				out.cancel()
 				return err
 			}
 		}
@@ -150,18 +153,13 @@ func (out *pipeOutput) outputLoop(ctx context.Context, buff_chan chan []float32)
 		select {
 		case <-ctx.Done():
 			return nil
+
 		default:
 			<-tempo.C
 			out.lock.Lock()
 
-			for out.paused && !out.closed {
+			for out.paused {
 				out.cond.Wait()
-			}
-
-			if out.closed {
-				out.lock.Unlock()
-				ctx.Done()
-				return nil
 			}
 
 			floats := <-buff_chan
@@ -170,7 +168,7 @@ func (out *pipeOutput) outputLoop(ctx context.Context, buff_chan chan []float32)
 			_, err := out.file.Write(bytes[:nn])
 			if err != nil {
 				out.err <- err
-				out.closed = true
+				out.cancel()
 				out.lock.Unlock()
 				return err
 			}
@@ -181,7 +179,7 @@ func (out *pipeOutput) outputLoop(ctx context.Context, buff_chan chan []float32)
 			} else if err != nil {
 				// Got some other error. Close the output and report the error.
 				out.err <- err
-				out.closed = true
+				out.cancel()
 				out.lock.Unlock()
 				return err
 			}
@@ -195,10 +193,6 @@ func (out *pipeOutput) Pause() error {
 	out.lock.Lock()
 	defer out.lock.Unlock()
 
-	if out.closed {
-		return nil
-	}
-
 	out.paused = true
 	out.cond.Signal()
 	return nil
@@ -207,10 +201,6 @@ func (out *pipeOutput) Pause() error {
 func (out *pipeOutput) Resume() error {
 	out.lock.Lock()
 	defer out.lock.Unlock()
-
-	if out.closed {
-		return nil
-	}
 
 	out.paused = false
 	out.cond.Signal()
@@ -240,17 +230,14 @@ func (out *pipeOutput) Error() <-chan error {
 }
 
 func (out *pipeOutput) Close() error {
-	out.lock.Lock()
-	defer out.lock.Unlock()
-
-	if out.closed {
+	if out.cancel == nil {
 		return nil
 	}
 
 	_ = out.file.Close()
 
-	out.closed = true
-	out.cond.Signal()
+	out.cancel()
+	out.cancel = nil
 
 	return nil
 }
