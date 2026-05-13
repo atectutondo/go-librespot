@@ -27,6 +27,7 @@ type pipeOutput struct {
 
 	volume float32
 	paused bool
+	group  *errgroup.Group
 	cancel context.CancelFunc
 
 	volumeUpdate chan float32
@@ -91,12 +92,14 @@ func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
 
 	var ctx context.Context
 	ctx, out.cancel = context.WithCancel(context.Background())
-	g, ctx := errgroup.WithContext(ctx)
-	g.Go(func() error {
+
+	out.group, ctx = errgroup.WithContext(ctx)
+
+	out.group.Go(func() error {
 		return out.readerLoop(ctx, buffer_chan) // legge da spotify e scrive sul canale
 	})
 
-	g.Go(func() error {
+	out.group.Go(func() error {
 		return out.outputLoop(ctx, buffer_chan) // legge dal canale e scrive sul pipe i dati per pipewire
 	})
 
@@ -105,11 +108,13 @@ func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
 
 func (out *pipeOutput) readerLoop(ctx context.Context, buff_chan chan []float32) error {
 	floats := make([]float32, 4*1024) // slice di dati da leggere da spotify
-
-	defer out.Close()
+	fmt.Println("READERLOOP: AVVIATO")
+	defer close(buff_chan)
+	// defer out.Close()
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Println("readerLoop: mi sono chiuso")
 			return nil
 
 		default:
@@ -128,13 +133,20 @@ func (out *pipeOutput) readerLoop(ctx context.Context, buff_chan chan []float32)
 
 			newBuf := make([]float32, n)
 			copy(newBuf, floats[:n])
-			buff_chan <- newBuf
+			select {
+			case <-ctx.Done():
+				fmt.Println("readerLoop: mi sono chiuso durante l'invio")
+				return nil
+			case buff_chan <- newBuf:
+				// Dati inviati, prosegui
+			}
 
 			if errors.Is(err, io.EOF) {
 				// Reached EOF, move to a "paused" state.
 				time.Sleep(100 * time.Millisecond)
 			} else if err != nil {
 				// Got some other error. Close the output and report the error.
+				fmt.Println("ERRORE readerLoop: mi sono chiuso")
 				out.err <- err
 				out.cancel()
 				return err
@@ -144,32 +156,47 @@ func (out *pipeOutput) readerLoop(ctx context.Context, buff_chan chan []float32)
 }
 
 func (out *pipeOutput) outputLoop(ctx context.Context, buff_chan chan []float32) error {
+	fmt.Println("OUTPUTLOOP: AVVIATO")
 	bytes := make([]byte, 4*4096) // times four is the biggest we can get
 	tempo := time.NewTicker(46200 * time.Microsecond)
 	defer tempo.Stop()
-	defer out.Close()
+	// defer out.Close()
 
 	for {
 		select {
 		case <-ctx.Done():
+			fmt.Println("outputLoop: mi sono chiuso")
 			return nil
 
 		default:
 			<-tempo.C
 			out.lock.Lock()
+			paused := out.paused
+			out.lock.Unlock()
 
-			for out.paused {
-				out.cond.Wait()
+			if paused {
+				continue // Skip this tick and wait for the next one or context cancel
 			}
 
-			floats := <-buff_chan
+			var floats []float32
+			var ok bool
+			select {
+			case floats, ok = <-buff_chan:
+				if !ok {
+					fmt.Println("outputLoop: mi sono chiuso")
+					return nil // Signal to close loop
+				}
+			case <-ctx.Done():
+				fmt.Println("outputLoop: mi sono chiuso")
+				return nil
+			}
 
 			nn := out.transform(floats, bytes)
 			_, err := out.file.Write(bytes[:nn])
 			if err != nil {
+				fmt.Println("ERRORE outputLoop: mi sono chiuso")
 				out.err <- err
 				out.cancel()
-				out.lock.Unlock()
 				return err
 			}
 
@@ -178,13 +205,11 @@ func (out *pipeOutput) outputLoop(ctx context.Context, buff_chan chan []float32)
 				out.paused = true
 			} else if err != nil {
 				// Got some other error. Close the output and report the error.
+				fmt.Println("ERRORE outputLoop: mi sono chiuso")
 				out.err <- err
 				out.cancel()
-				out.lock.Unlock()
 				return err
 			}
-
-			out.lock.Unlock()
 		}
 	}
 }
@@ -216,8 +241,15 @@ func (out *pipeOutput) DelayMs() (int64, error) {
 }
 
 func (out *pipeOutput) SetVolume(vol float32) {
-	if vol < 0 || vol > 1 {
-		panic(fmt.Sprintf("invalid volume value: %0.2f", vol))
+	// if vol < 0 || vol > 1 {
+	// 	panic(fmt.Sprintf("invalid volume value: %0.2f", vol))
+	// }
+
+	if vol < 0 {
+		vol = 0
+	}
+	if vol > 1 {
+		vol = 1
 	}
 
 	out.volume = vol
@@ -230,14 +262,27 @@ func (out *pipeOutput) Error() <-chan error {
 }
 
 func (out *pipeOutput) Close() error {
+	fmt.Println("HO CHIAMATO LA FUNZIONE DI CHIUSURA!!!")
+	out.lock.Lock()
 	if out.cancel == nil {
+		out.lock.Unlock()
 		return nil
 	}
 
-	_ = out.file.Close()
-
 	out.cancel()
-	out.cancel = nil
 
+	out.paused = false
+	out.cond.Broadcast()
+	out.lock.Unlock()
+
+	if closer, ok := out.reader.(io.Closer); ok {
+		_ = closer.Close()
+		fmt.Println("HO CHIUSO READER DA SPOTIFY")
+	}
+
+	_ = out.file.Close()
+	fmt.Println("HO CHIUSO WRITER SU PIPE")
+
+	// out.cancel = nil
 	return nil
 }
