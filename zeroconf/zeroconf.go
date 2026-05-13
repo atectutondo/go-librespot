@@ -25,8 +25,12 @@ type Zeroconf struct {
 	deviceId   string
 	deviceType devicespb.DeviceType
 
-	listener  net.Listener
-	registrar ServiceRegistrar
+	listener              net.Listener
+	listenPort            int
+	interfacesToAdvertise []string
+	useAvahi              bool
+	port                  int
+	registrar             ServiceRegistrar
 
 	dh *dh.DiffieHellman
 
@@ -60,6 +64,10 @@ func NewZeroconf(log librespot.Logger, port int, deviceName, deviceId string, de
 	}
 
 	listenPort := z.listener.Addr().(*net.TCPAddr).Port
+	z.listenPort = listenPort
+	z.port = listenPort
+	z.interfacesToAdvertise = interfacesToAdvertise
+	z.useAvahi = useAvahi
 	log.Infof("zeroconf server listening on port %d", listenPort)
 
 	// Select the mDNS backend based on configuration
@@ -89,7 +97,7 @@ func NewZeroconf(log librespot.Logger, port int, deviceName, deviceId string, de
 	}
 
 	// Register the Spotify Connect service
-	err = z.registrar.Register(deviceName, "_spotify-connect._tcp", "local.", listenPort, []string{"CPath=/", "VERSION=1.0", "Stack=SP"})
+	err = z.registerService()
 	if err != nil {
 		z.registrar.Shutdown()
 		_ = z.listener.Close()
@@ -110,6 +118,57 @@ func (z *Zeroconf) SetCurrentUser(username string) {
 func (z *Zeroconf) Close() {
 	z.registrar.Shutdown()
 	_ = z.listener.Close()
+}
+
+func (z *Zeroconf) newRegistrar() (ServiceRegistrar, error) {
+	if z.useAvahi {
+		return NewAvahiRegistrar()
+	}
+
+	var ifaces []net.Interface
+	for _, ifaceName := range z.interfacesToAdvertise {
+		liface, err := net.InterfaceByName(ifaceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed interface %s: %w", ifaceName, err)
+		}
+		ifaces = append(ifaces, *liface)
+	}
+
+	return NewBuiltinRegistrar(ifaces), nil
+}
+
+func (z *Zeroconf) registerService() error {
+	return z.registrar.Register(
+		z.deviceName,
+		"_spotify-connect._tcp",
+		"local.",
+		z.listenPort,
+		[]string{"CPath=/", "VERSION=1.0", "Stack=SP"},
+	)
+}
+
+func (z *Zeroconf) RestartWithDeviceName(name string) error {
+	z.log.Infof("restarting zeroconf with new device name: %s", name)
+
+	// stop current advertisement
+	z.registrar.Shutdown()
+
+	// recreate registrar (IMPORTANTISSIMO)
+	reg, err := z.newRegistrar()
+	if err != nil {
+		return fmt.Errorf("failed recreating registrar: %w", err)
+	}
+	z.registrar = reg
+
+	// update name
+	z.deviceName = name
+
+	// re-register service
+	if err := z.registerService(); err != nil {
+		return fmt.Errorf("failed re-registering service: %w", err)
+	}
+
+	return nil
 }
 
 func (z *Zeroconf) handleGetInfo(writer http.ResponseWriter, _ *http.Request) error {

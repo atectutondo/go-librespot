@@ -57,6 +57,8 @@ type ApiRequestType string
 
 const (
 	ApiRequestTypeRoot                ApiRequestType = "root"
+	ApiRequestTypeInfo                ApiRequestType = "info"
+	ApiRequestTypeChangeName          ApiRequestType = "change_name"
 	ApiRequestTypeWebApi              ApiRequestType = "web_api"
 	ApiRequestTypeStatus              ApiRequestType = "status"
 	ApiRequestTypeResume              ApiRequestType = "resume"
@@ -141,6 +143,10 @@ type ApiRequestDataPlay struct {
 	Uri       string `json:"uri"`
 	SkipToUri string `json:"skip_to_uri"`
 	Paused    bool   `json:"paused"`
+}
+
+type ApiRequestChangeName struct {
+	DeviceName string `json:"device_name"`
 }
 
 type ApiRequestDataNext struct {
@@ -277,6 +283,12 @@ type ApiResponseRoot struct {
 type ApiResponseVolume struct {
 	Value uint32 `json:"value"`
 	Max   uint32 `json:"max"`
+}
+
+// risposta per ottenere info anche quando non c'è sessione attiva
+type ApiResponseInfo struct {
+	DeviceId   string `json:"device_id"`
+	DeviceName string `json:"device_name"`
 }
 
 type ApiResponseToken struct {
@@ -458,6 +470,33 @@ func (s *ConcreteApiServer) serve() {
 		}
 
 		s.handleRequest(ApiRequest{Type: ApiRequestTypeStatus}, w)
+	})
+	m.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		s.handleRequest(ApiRequest{Type: ApiRequestTypeInfo}, w)
+	})
+	m.HandleFunc("/name", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		var data ApiRequestChangeName
+		if err := jsonDecode(r, &data); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if len(data.DeviceName) == 0 || len(data.DeviceName) >= 64 {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		s.handleRequest(ApiRequest{Type: ApiRequestTypeChangeName, Data: data}, w)
 	})
 	m.HandleFunc("/player/play", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
