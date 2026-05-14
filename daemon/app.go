@@ -331,17 +331,75 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 	go func() {
 		for {
 			select {
+			case <-ctx.Done():
+				app.log.Debug("closing API bridge goroutine")
+				return
+
 			case req := <-app.server.Receive():
 				if currentPlayer == nil {
 					if req.Type == ApiRequestTypeRoot {
 						req.Reply(&ApiResponseRoot{}, nil)
+					} else if req.Type == ApiRequestTypeInfo { // aggiunta per ottenere info anche senza player connesso
+						req.Reply(&ApiResponseInfo{
+							DeviceId:   app.deviceId,
+							DeviceName: app.cfg.DeviceName,
+						}, nil)
+					} else if req.Type == ApiRequestTypeChangeName {
+						data := req.Data.(ApiRequestChangeName)
+
+						newName := data.DeviceName
+
+						app.cfg.DeviceName = newName
+
+						// restart zeroconf advertisement
+						if err := z.RestartWithDeviceName(newName); err != nil {
+							req.Reply(nil, err)
+							continue
+						}
+
+						// reconnect spotify session/device
+						if currentPlayer != nil {
+							currentPlayer.Close()
+
+							if apiCh != nil {
+								close(apiCh)
+							}
+
+							newPlayer, err := appPlayerFunc(ctx)
+							if err != nil {
+								req.Reply(nil, err)
+								break
+							}
+
+							apiCh = make(chan ApiRequest)
+							currentPlayer = newPlayer
+
+							go newPlayer.Run(ctx, apiCh, app.mpris.Receive())
+						}
+
+						req.Reply(map[string]string{
+							"status":   "ok",
+							"new_name": newName,
+						}, nil)
 					} else {
 						req.Reply(nil, ErrNoSession)
 					}
 					break
 				}
 
-				apiCh <- req
+				if req.Type == ApiRequestTypeInfo { // aggiunta per ottenere info anche senza player connesso
+					req.Reply(&ApiResponseInfo{
+						DeviceId:   app.deviceId,
+						DeviceName: app.cfg.DeviceName,
+					}, nil)
+				} else if req.Type == ApiRequestTypeChangeName {
+					req.Reply(map[string]string{
+						"status":   "maledetto",
+						"new_name": app.cfg.DeviceName,
+					}, ErrForbidden)
+				} else {
+					apiCh <- req
+				}
 			}
 		}
 	}()
@@ -386,7 +444,7 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 			currentPlayer.Close()
 			currentPlayer = nil
 
-			close(apiCh)
+			// close(apiCh)
 		}
 
 		newAppPlayer, err := app.newAppPlayer(ctx, session.BlobCredentials{

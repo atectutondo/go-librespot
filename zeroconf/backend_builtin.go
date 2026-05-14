@@ -30,5 +30,7 @@ func (b *BuiltinRegistrar) Register(name, serviceType, domain string, port int, 
 func (b *BuiltinRegistrar) Shutdown() {
 	if b.server != nil {
 		b.server.Shutdown()
+		b.server = nil
 	}
+
 }

@@ -673,6 +673,9 @@ func (p *AppPlayer) Close() {
 	p.stop <- struct{}{}
 	p.player.Close()
 	p.sess.Close()
+	if p.prefetchTimer != nil {
+		p.prefetchTimer.Stop()
+	}
 }
 
 func (p *AppPlayer) Run(ctx context.Context, apiRecv <-chan ApiRequest, mprisRecv <-chan mpris.MediaPlayer2PlayerCommand) {
