@@ -393,10 +393,42 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 						DeviceName: app.cfg.DeviceName,
 					}, nil)
 				} else if req.Type == ApiRequestTypeChangeName {
+					data := req.Data.(ApiRequestChangeName)
+
+					newName := data.DeviceName
+
+					app.cfg.DeviceName = newName
+
+					// restart zeroconf advertisement
+					if err := z.RestartWithDeviceName(newName); err != nil {
+						req.Reply(nil, err)
+						continue
+					}
+
+					// reconnect spotify session/device
+					if currentPlayer != nil {
+						currentPlayer.Close()
+
+						if apiCh != nil {
+							close(apiCh)
+						}
+
+						newPlayer, err := appPlayerFunc(ctx)
+						if err != nil {
+							req.Reply(nil, err)
+							break
+						}
+
+						apiCh = make(chan ApiRequest)
+						currentPlayer = newPlayer
+
+						go newPlayer.Run(ctx, apiCh, app.mpris.Receive())
+					}
+
 					req.Reply(map[string]string{
-						"status":   "maledetto",
-						"new_name": app.cfg.DeviceName,
-					}, ErrForbidden)
+						"status":   "ok",
+						"new_name": newName,
+					}, nil)
 				} else {
 					apiCh <- req
 				}
