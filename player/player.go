@@ -258,7 +258,7 @@ loop:
 				if data.drop {
 					_ = out.Drop()
 				}
-				// --- START FIX: Isolated Playlist Loop Stabilizer ---
+
 				// Check if the previous track was active for less than 1 second.
 				// This targets the rapid-fire looping bug without slowing down manual skips.
 				if data.primary && !data.paused && data.drop {
@@ -267,9 +267,7 @@ loop:
 						time.Sleep(500 * time.Millisecond)
 					}
 				}
-				// --- END FIX ---
 
-				// Now it is safe to overwrite the start time for the new track
 				p.startedPlaying = time.Now()
 
 				cmd.resp <- nil
