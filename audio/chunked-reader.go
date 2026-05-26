@@ -18,9 +18,9 @@ import (
 	librespot "github.com/devgianlu/go-librespot"
 )
 
-const (
-	DefaultChunkSize = 512 * 1024
-	PrefetchCount    = 3
+const ( // si può diminuire dimensione chunl e quantità prefetch
+	DefaultChunkSize = 256 * 1024
+	PrefetchCount    = 2
 )
 
 var contentRangeRegexp = regexp.MustCompile("^bytes (\\d+)-(\\d+)/(\\d+)$")

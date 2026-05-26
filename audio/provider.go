@@ -25,7 +25,8 @@ type KeyProvider struct {
 	ap  *ap.Accesspoint
 	log librespot.Logger
 
-	recvLoopOnce sync.Once
+	mu      sync.Mutex
+	running bool
 
 	reqChan chan keyRequest
 }
@@ -34,6 +35,7 @@ type keyRequest struct {
 	gid    []byte
 	fileId []byte
 	resp   chan keyResponse
+	sentAt time.Time // add this
 }
 
 type keyResponse struct {
@@ -48,10 +50,20 @@ func NewAudioKeyProvider(log librespot.Logger, ap *ap.Accesspoint) *KeyProvider 
 }
 
 func (p *KeyProvider) startReceiving() {
-	p.recvLoopOnce.Do(func() { go p.recvLoop() })
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if !p.running {
+		p.running = true
+		go p.recvLoop()
+	}
 }
 
 func (p *KeyProvider) recvLoop() {
+	defer func() {
+		p.mu.Lock()
+		p.running = false
+		p.mu.Unlock()
+	}()
 	ch := p.ap.Receive(ap.PacketTypeAesKey, ap.PacketTypeAesKeyError)
 	done := p.ap.Done()
 
@@ -61,6 +73,9 @@ func (p *KeyProvider) recvLoop() {
 	for {
 		select {
 		case <-done:
+			for _, req := range reqs {
+				req.resp <- keyResponse{err: ap.ErrAccesspointClosed}
+			}
 			return
 		case pkt, ok := <-ch:
 			if !ok {
@@ -79,6 +94,11 @@ func (p *KeyProvider) recvLoop() {
 
 			delete(reqs, respSeq)
 
+			if time.Since(req.sentAt) > 15*time.Second {
+				p.log.Warnf("discarding stale aes key response for seq %d", respSeq)
+				continue
+			}
+
 			switch pkt.Type {
 			case ap.PacketTypeAesKey:
 				key := make([]byte, 16)
@@ -94,6 +114,8 @@ func (p *KeyProvider) recvLoop() {
 		case req := <-p.reqChan:
 			reqSeq := seq
 			seq++
+
+			req.sentAt = time.Now()
 
 			var buf bytes.Buffer
 			_, _ = buf.Write(req.fileId)
@@ -121,9 +143,13 @@ func (p *KeyProvider) Request(ctx context.Context, gid []byte, fileId []byte) ([
 	p.startReceiving()
 
 	req := keyRequest{gid: gid, fileId: fileId, resp: make(chan keyResponse, 1)}
+	ctx2, cancel2 := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel2()
 	select {
 	case <-done:
 		return nil, ap.ErrAccesspointClosed
+	case <-ctx2.Done():
+		return nil, ctx2.Err()
 	case p.reqChan <- req:
 	}
 
