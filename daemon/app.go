@@ -386,7 +386,14 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 					break
 				}
 
-				apiCh <- req
+				if req.Type == ApiRequestTypeInfo { // aggiunta per ottenere info anche senza player connesso
+					req.Reply(&ApiResponseInfo{
+						DeviceId:   app.deviceId,
+						DeviceName: app.cfg.DeviceName,
+					}, nil)
+				} else {
+					apiCh <- req
+				}
 			}
 		}
 	}()

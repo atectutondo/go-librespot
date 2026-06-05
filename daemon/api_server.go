@@ -57,6 +57,7 @@ type ApiRequestType string
 
 const (
 	ApiRequestTypeRoot                ApiRequestType = "root"
+	ApiRequestTypeInfo                ApiRequestType = "info"
 	ApiRequestTypeWebApi              ApiRequestType = "web_api"
 	ApiRequestTypeStatus              ApiRequestType = "status"
 	ApiRequestTypeResume              ApiRequestType = "resume"
@@ -288,6 +289,11 @@ type ApiResponseToken struct {
 	Token string `json:"token"`
 }
 
+type ApiResponseInfo struct {
+	DeviceId   string `json:"device_id"`
+	DeviceName string `json:"name"`
+}
+
 type ApiEvent struct {
 	Type ApiEventType `json:"type"`
 	Data any          `json:"data"`
@@ -464,6 +470,16 @@ func (s *ConcreteApiServer) serve() {
 
 		s.handleRequest(ApiRequest{Type: ApiRequestTypeStatus}, w)
 	})
+
+	m.HandleFunc("/info", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "GET" {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+
+		s.handleRequest(ApiRequest{Type: ApiRequestTypeInfo}, w)
+	})
+
 	m.HandleFunc("/player/play", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			w.WriteHeader(http.StatusMethodNotAllowed)
