@@ -2,6 +2,7 @@ package player
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
 	"io"
 	"math"
@@ -21,7 +22,6 @@ import (
 	streamingpb "github.com/devgianlu/go-librespot/proto/spotify/streaming"
 	"github.com/devgianlu/go-librespot/spclient"
 	"github.com/devgianlu/go-librespot/vorbis"
-	"golang.org/x/exp/rand"
 )
 
 const (
@@ -255,6 +255,19 @@ loop:
 					}
 				}
 
+				// Check if the previous track was active for less than 1 second.
+				// This targets the rapid-fire looping bug without slowing down manual skips.
+				if data.primary && !data.paused && data.drop {
+					if !p.startedPlaying.IsZero() && time.Since(p.startedPlaying) < 2500*time.Millisecond {
+						go func() {
+							time.Sleep(600 * time.Millisecond)
+							// re-send the cmd after delay
+						}()
+						cmd.resp <- nil
+						break
+					}
+				}
+
 				if data.drop {
 					_ = out.Drop()
 				}
@@ -336,7 +349,10 @@ loop:
 				panic("unknown player command")
 			}
 		case err := <-outErr:
-			if err != nil {
+			if err == nil {
+				// clean exit from output, don't log as error
+				p.log.Debugf("output device closed cleanly")
+			} else {
 				p.log.WithError(err).Errorf("output device failed")
 			}
 
@@ -345,10 +361,14 @@ loop:
 			out = nil
 			outErr = make(<-chan error)
 
+			if err != nil { // only emit stop on actual error, not clean close
+				p.ev <- Event{Type: EventTypeStop}
+			}
+
 			p.log.Tracef("cleared closed output device")
 
 			// FIXME: this is called even if not needed, like when autoplay starts
-			p.ev <- Event{Type: EventTypeStop}
+			// p.ev <- Event{Type: EventTypeStop}
 		case <-source.Done():
 			p.ev <- Event{Type: EventTypeNotPlaying}
 		}
@@ -455,6 +475,13 @@ func (p *Player) httpChunkedReaderFromStorageResolve(log librespot.Logger, clien
 		}
 
 		log.Tracef("found %d cdn urls", len(storageResolve.Cdnurl))
+
+		now := time.Now()
+		for host, t := range p.cdnQuarantine {
+			if now.Sub(t) >= CdnUrlQuarantineDuration {
+				delete(p.cdnQuarantine, host)
+			}
+		}
 
 		var err error
 		for i := 0; i < len(storageResolve.Cdnurl); i++ {
@@ -578,7 +605,9 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 	log := p.log.WithField("uri", spotId.Uri())
 
 	playbackId := make([]byte, 16)
-	_, _ = rand.Read(playbackId)
+	if _, err := rand.Read(playbackId); err != nil {
+		return nil, fmt.Errorf("failed generating playback id: %w", err)
+	}
 
 	p.events.PreStreamLoadNew(playbackId, spotId, mediaPosition)
 

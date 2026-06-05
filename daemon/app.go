@@ -359,13 +359,25 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 				if currentPlayer == nil {
 					if req.Type == ApiRequestTypeRoot {
 						req.Reply(&ApiResponseRoot{}, nil)
+					} else if req.Type == ApiRequestTypeInfo { // aggiunta per ottenere info anche senza player connesso
+						req.Reply(&ApiResponseInfo{
+							DeviceId:   app.deviceId,
+							DeviceName: app.cfg.DeviceName,
+						}, nil)
 					} else {
 						req.Reply(nil, ErrNoSession)
 					}
 					break
 				}
 
-				apiCh <- req
+				if req.Type == ApiRequestTypeInfo { // aggiunta per ottenere info anche senza player connesso
+					req.Reply(&ApiResponseInfo{
+						DeviceId:   app.deviceId,
+						DeviceName: app.cfg.DeviceName,
+					}, nil)
+				} else {
+					apiCh <- req
+				}
 			}
 		}
 	}()

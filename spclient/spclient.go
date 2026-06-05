@@ -217,7 +217,7 @@ func (c *Spclient) ResolveStorageInteractive(ctx context.Context, fileId []byte,
 
 	defer func() { _ = resp.Body.Close() }()
 
-	if resp.StatusCode == 503 {
+	if resp.StatusCode == 503 || resp.StatusCode == 500 || resp.StatusCode == 429 {
 		c.log.Debugf("storage resolve returned service unavailable, retrying...")
 		_ = resp.Body.Close()
 

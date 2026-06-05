@@ -19,8 +19,8 @@ import (
 )
 
 const (
-	DefaultChunkSize = 512 * 1024
-	PrefetchCount    = 3
+	DefaultChunkSize = 256 * 1024
+	PrefetchCount    = 2
 )
 
 var contentRangeRegexp = regexp.MustCompile("^bytes (\\d+)-(\\d+)/(\\d+)$")
