@@ -88,7 +88,7 @@ func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
 		return nil, fmt.Errorf("failed to set blocking mode on fifo: %w", err)
 	}
 
-	buffer_chan := make(chan []float32, 2)
+	buffer_chan := make(chan []float32, 5)
 
 	var ctx context.Context
 	ctx, out.cancel = context.WithCancel(context.Background())
