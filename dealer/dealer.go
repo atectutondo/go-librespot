@@ -137,13 +137,24 @@ loop:
 		case <-d.done:
 			break loop
 		case <-ticker.C:
+
+			// Snapshot the connection reference *before* the timeout check.
+			// closeConn acquires RLock, which blocks while recvLoop holds the
+			// write lock during reconnection. By the time it unblocks, d.conn
+			// may already point to the new socket. Using closeConnRef with a
+			// pre-captured reference ensures we only close the stale connection,
+			// not the one that was just re-established.
+			d.connMu.RLock()
+			connSnapshot := d.conn
+			d.connMu.RUnlock()
+
 			timePassed := d.timeSinceLastPong()
 			if timePassed > pingInterval+timeout {
 				d.log.Errorf("did not receive last pong from dealer, %.0fs passed", timePassed.Seconds())
 
 				// closing the connection should make the read on the "recvLoop" fail,
 				// continue hoping for a new connection
-				d.closeConn(websocket.StatusServiceRestart)
+				d.closeConnRef(connSnapshot, websocket.StatusServiceRestart)
 				continue
 			}
 
@@ -236,18 +247,31 @@ loop:
 	case <-d.done:
 	default:
 		d.connMu.Lock()
-		if err := backoff.Retry(d.reconnect, backoff.NewExponentialBackOff()); err != nil {
-			d.log.WithError(err).Errorf("failed reconnecting dealer")
-			d.connMu.Unlock()
-
-			// something went very wrong, give up
-			d.Close()
-		} else {
-			d.connMu.Unlock()
-
+		b := backoff.NewExponentialBackOff()
+		// MaxElapsedTime=0 means retry forever. The default (15 min) would
+		// eventually exhaust, causing d.Close() to be called and permanently
+		// killing the dealer even though the service is only temporarily unavailable.
+		b.MaxElapsedTime = 0
+		err := backoff.Retry(func() error {
+			// Honour an explicit Close() even while retrying.
+			select {
+			case <-d.done:
+				return backoff.Permanent(ErrDealerClosed)
+			default:
+				return d.reconnect()
+			}
+		}, b)
+		d.connMu.Unlock()
+		if err == nil {
 			// reconnection was successful, do not close receivers
 			return
 		}
+		if !errors.Is(err, ErrDealerClosed) {
+			// backoff.Permanent was returned for a non-dealer-closed reason
+			d.log.WithError(err).Errorf("failed reconnecting dealer")
+			d.Close()
+		}
+		// ErrDealerClosed: dealer was intentionally shut down during retry — fall through
 	}
 
 	d.requestReceiversLock.RLock()
