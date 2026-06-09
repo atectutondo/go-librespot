@@ -8,6 +8,7 @@ import (
 	"math"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
@@ -350,12 +351,13 @@ loop:
 
 			if err != nil { // only emit stop on actual error, not clean close
 				p.ev <- Event{Type: EventTypeStop}
+				continue
 			}
 
 			p.log.Tracef("cleared closed output device")
 
 			// FIXME: this is called even if not needed, like when autoplay starts
-			// p.ev <- Event{Type: EventTypeStop}
+			p.ev <- Event{Type: EventTypeStop}
 		case <-source.Done():
 			p.ev <- Event{Type: EventTypeNotPlaying}
 		}
@@ -667,7 +669,25 @@ func (p *Player) NewStream(ctx context.Context, client *http.Client, spotId libr
 
 	log.Debugf("selected format %s (%x)", file.Format.String(), file.FileId)
 
-	audioKey, err := p.retrieveAudioKey(ctx, spotId, file.FileId)
+	var audioKey []byte
+	var err error
+	backoff := []time.Duration{150 * time.Millisecond, 500 * time.Millisecond, 1500 * time.Millisecond, 3000 * time.Millisecond}
+	for i := 0; i < len(backoff)+1; i++ {
+		audioKey, err = p.retrieveAudioKey(ctx, spotId, file.FileId)
+		if err == nil {
+			break
+		}
+
+		p.log.WithError(err).Warnf("audio key fetch failed (attempt %d)", i+1)
+
+		if !strings.Contains(err.Error(), "code 2") {
+			break
+		}
+
+		if i < len(backoff) {
+			time.Sleep(backoff[i])
+		}
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed retrieving audio key: %w", err)
 	}

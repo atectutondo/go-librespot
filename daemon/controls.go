@@ -51,7 +51,15 @@ func (p *AppPlayer) prefetchNext(ctx context.Context) {
 
 	p.secondaryStream, err = p.player.NewStream(ctx, p.app.client, *nextId, p.app.cfg.Bitrate, 0)
 	if err != nil {
-		p.app.log.WithError(err).WithField("uri", nextId.String()).Warnf("failed prefetching %s stream", nextId.Type())
+		p.app.log.WithError(err).WithField("uri", nextId.String()).
+			Warnf("failed prefetching %s stream (ignored)", nextId.Type())
+
+		// IMPORTANT: ensure we do not keep partial state
+		p.secondaryStream = nil
+		p.player.SetSecondaryStream(nil)
+		p.lastPrefetchFailedUri = nextId.Uri() // add this
+		p.lastPrefetchFailedAt = time.Now()    // add this
+
 		return
 	}
 
@@ -69,10 +77,11 @@ func (p *AppPlayer) schedulePrefetchNext() {
 	}
 
 	untilTrackEnd := time.Duration(p.primaryStream.Media.Duration()-int32(p.player.PositionMs())) * time.Millisecond
-	untilTrackEnd -= 30 * time.Second
+	untilTrackEnd -= 45 * time.Second
 	if untilTrackEnd < 10*time.Second {
 		p.prefetchTimer.Reset(0)
 		p.app.log.Tracef("prefetch as soon as possible")
+		return
 	} else {
 		p.prefetchTimer.Reset(untilTrackEnd)
 		p.app.log.Tracef("scheduling prefetch in %.0fs", untilTrackEnd.Seconds())
@@ -195,7 +204,30 @@ func (p *AppPlayer) handlePlayerEvent(ctx context.Context, ev *player.Event) {
 
 		hasNextTrack, err := p.advanceNext(context.TODO(), false, false)
 		if err != nil {
-			p.app.log.WithError(err).Error("failed advancing to next track")
+			p.app.log.WithError(err).Warnf("failed advancing to next track, attempting to skip")
+
+			hasNextTrack, err = p.advanceNext(context.TODO(), true, false)
+			if err != nil {
+				p.app.log.WithError(err).Error("failed advancing to next track after skip, stopping")
+
+				p.primaryStream = nil
+				p.secondaryStream = nil
+
+				p.state.player.IsPlaying = false
+				p.state.player.IsBuffering = false
+				p.state.setPaused(true)
+
+				p.emitMprisUpdate(mpris.Stopped)
+
+				p.app.server.Emit(&ApiEvent{
+					Type: ApiEventTypeStopped,
+					Data: ApiEventDataStopped{
+						PlayOrigin: p.state.playOrigin(),
+					},
+				})
+
+				return
+			}
 		}
 
 		// if no track to be played, just stop
@@ -342,6 +374,13 @@ func (p *AppPlayer) loadCurrentTrack(ctx context.Context, paused, drop bool) err
 		prefetched = false
 
 		var err error
+		if p.secondaryStream == nil &&
+			p.lastPrefetchFailedUri == spotId.Uri() &&
+			time.Since(p.lastPrefetchFailedAt) < 2*time.Second {
+			wait := 2*time.Second - time.Since(p.lastPrefetchFailedAt)
+			p.app.log.Debugf("waiting %dms before retrying key for recently-failed uri %s", wait.Milliseconds(), spotId.Uri())
+			time.Sleep(wait)
+		}
 		p.primaryStream, err = p.player.NewStream(ctx, p.app.client, *spotId, p.app.cfg.Bitrate, trackPosition)
 		if err != nil {
 			return fmt.Errorf("failed creating stream for %s: %w", spotId, err)
@@ -701,6 +740,13 @@ func (p *AppPlayer) advanceNext(ctx context.Context, forceNext, drop bool) (bool
 		p.app.log.WithError(err).Infof("skipping unplayable media: %s", uri)
 		if forceNext {
 			// we failed in finding another track to play, just stop
+			return false, err
+		}
+
+		return p.advanceNext(ctx, true, drop)
+	} else if err != nil && strings.Contains(err.Error(), "failed retrieving audio key") {
+		p.app.log.WithError(err).Warnf("skipping track due to audio key failure: %s", uri)
+		if forceNext {
 			return false, err
 		}
 

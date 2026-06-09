@@ -55,6 +55,9 @@ type AppPlayer struct {
 	secondaryStream *player.Stream
 
 	prefetchTimer *time.Timer
+
+	lastPrefetchFailedUri string
+	lastPrefetchFailedAt  time.Time
 }
 
 func (p *AppPlayer) playbackReady() bool {
