@@ -255,19 +255,6 @@ loop:
 					}
 				}
 
-				// Check if the previous track was active for less than 1 second.
-				// This targets the rapid-fire looping bug without slowing down manual skips.
-				if data.primary && !data.paused && data.drop {
-					if !p.startedPlaying.IsZero() && time.Since(p.startedPlaying) < 2500*time.Millisecond {
-						go func() {
-							time.Sleep(600 * time.Millisecond)
-							// re-send the cmd after delay
-						}()
-						cmd.resp <- nil
-						break
-					}
-				}
-
 				if data.drop {
 					_ = out.Drop()
 				}
