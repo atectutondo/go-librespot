@@ -491,6 +491,13 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 						// even when no session is active.
 						app.SetDeviceName(req.Data.(string))
 						req.Reply(nil, nil)
+
+					case ApiRequestTypeInfo:
+						req.Reply(&ApiResponseInfo{
+							DeviceId:   app.deviceId,
+							DeviceName: app.cfg.DeviceName,
+						}, nil)
+
 					default:
 						req.Reply(nil, ErrNoSession)
 					}
