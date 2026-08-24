@@ -491,16 +491,28 @@ func (app *App) withAppPlayer(ctx context.Context, appPlayerFunc func(context.Co
 						// even when no session is active.
 						app.SetDeviceName(req.Data.(string))
 						req.Reply(nil, nil)
-
 					case ApiRequestTypeInfo:
-						req.Reply(&ApiResponseInfo{
-							DeviceId:   app.deviceId,
-							DeviceName: app.cfg.DeviceName,
+						// Device id and name are known independently of any
+						// active session, so answer this directly instead of
+						// falling into the no-session error below.
+						req.Reply(&ApiInfo{
+							DeviceId: app.deviceId,
+							Name:     app.cfg.DeviceName,
 						}, nil)
-
 					default:
 						req.Reply(nil, ErrNoSession)
 					}
+					continue
+				}
+
+				if req.Type == ApiRequestTypeInfo {
+					// Answered here rather than forwarded: /info reports static
+					// device info that has nothing to do with the active player
+					// session, and the player has no handler for it.
+					req.Reply(&ApiInfo{
+						DeviceId: app.deviceId,
+						Name:     app.cfg.DeviceName,
+					}, nil)
 					continue
 				}
 

@@ -181,6 +181,18 @@ components:
             Whether the daemon is fully bootstrapped and ready to accept
             /player/play
           type: boolean
+    info:
+      x-go-name: ApiInfo
+      description: Static information about the player device
+      type: object
+      required: [ device_id, name ]
+      properties:
+        device_id:
+          description: The player device ID
+          type: string
+        name:
+          description: The player device name
+          type: string
     volume:
       x-go-name: ApiVolume
       description: The player volume settings
@@ -353,6 +365,17 @@ paths:
                 $ref: '#/components/schemas/status'
         204:
           description: No active session
+  /info:
+    get:
+      operationId: getInfo
+      description: Returns static information about the player device
+      responses:
+        200:
+          description: Successful response
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/info'
   /token:
     post:
       operationId: getToken

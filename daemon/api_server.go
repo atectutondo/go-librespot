@@ -61,6 +61,7 @@ type ApiRequestType string
 
 const (
 	ApiRequestTypeRoot                ApiRequestType = "root"
+	ApiRequestTypeInfo                ApiRequestType = "info"
 	ApiRequestTypeWebApi              ApiRequestType = "web_api"
 	ApiRequestTypeStatus              ApiRequestType = "status"
 	ApiRequestTypeResume              ApiRequestType = "resume"
@@ -420,6 +421,10 @@ var _ ServerInterface = (*ConcreteApiServer)(nil)
 
 func (s *ConcreteApiServer) GetRoot(w http.ResponseWriter, _ *http.Request) {
 	s.handleRequest(ApiRequest{Type: ApiRequestTypeRoot}, w)
+}
+
+func (s *ConcreteApiServer) GetInfo(w http.ResponseWriter, _ *http.Request) {
+	s.handleRequest(ApiRequest{Type: ApiRequestTypeInfo}, w)
 }
 
 func (s *ConcreteApiServer) GetStatus(w http.ResponseWriter, _ *http.Request) {
