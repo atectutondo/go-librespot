@@ -1,6 +1,7 @@
 package output
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -8,8 +9,10 @@ import (
 	"math"
 	"os"
 	"sync"
+	"time"
 
 	librespot "github.com/devgianlu/go-librespot"
+	"golang.org/x/sync/errgroup"
 )
 
 type pipeOutput struct {
@@ -24,6 +27,9 @@ type pipeOutput struct {
 	volume float32
 	paused bool
 	closed bool
+
+	group  *errgroup.Group
+	cancel context.CancelFunc
 
 	volumeUpdate chan float32
 	err          chan error
@@ -76,61 +82,103 @@ func newPipeTransform(format string) (func([]float32, []byte) int, error) {
 	}
 }
 
-func (out *pipeOutput) outputLoop() {
+func (out *pipeOutput) readerLoop(ctx context.Context, buff_chan chan []float32) error {
 	floats := make([]float32, 4*1024)
-	bytes := make([]byte, 4*len(floats)) // times four is the biggest we can get
+	fmt.Println("READERLOOP: AVVIATO")
+	defer close(buff_chan)
 
 	for {
-		out.lock.Lock()
+		select {
+		case <-ctx.Done():
+			fmt.Println("readerLoop: mi sono chiuso")
+			return nil
 
-		for out.paused && !out.closed {
-			out.cond.Wait()
-		}
+		default:
+			n, err := out.reader.Read(floats)
 
-		if out.closed {
-			out.lock.Unlock()
-			break
-		}
+			if !out.externalVolume {
+				volume := out.volume * out.volume
+				for i := 0; i < n; i++ {
+					floats[i] *= volume
+				}
+			}
 
-		n, err := out.reader.Read(floats)
+			newBuf := make([]float32, n)
+			copy(newBuf, floats[:n])
 
-		// Apply volume.
-		if !out.externalVolume {
-			// Map volume (in percent) to what is perceived as linear by
-			// humans. This is the same as math.Pow(out.volume, 2) but simpler.
-			volume := out.volume * out.volume
+			select {
+			case <-ctx.Done():
+				fmt.Println("readerLoop: mi sono chiuso durante l'invio")
+				return nil
+			case buff_chan <- newBuf:
+			}
 
-			for i := 0; i < n; i++ {
-				floats[i] *= volume
+			if errors.Is(err, io.EOF) {
+				time.Sleep(100 * time.Millisecond)
+			} else if err != nil {
+				fmt.Println("ERRORE readerLoop: mi sono chiuso")
+				out.err <- err
+				out.cancel()
+				return err
 			}
 		}
+	}
+}
 
-		if n > 0 {
-			nn := out.transform(floats[:n], bytes)
+func (out *pipeOutput) outputLoop(ctx context.Context, buff_chan chan []float32) error {
+	fmt.Println("OUTPUTLOOP: AVVIATO")
+	bytes := make([]byte, 4*4096)
+	tempo := time.NewTicker(46200 * time.Microsecond)
+	defer tempo.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("outputLoop: mi sono chiuso")
+			return nil
+
+		default:
+			<-tempo.C
+			out.lock.Lock()
+			paused := out.paused
+			out.lock.Unlock()
+
+			if paused {
+				continue
+			}
+
+			var floats []float32
+			var ok bool
+			select {
+			case floats, ok = <-buff_chan:
+				if !ok {
+					fmt.Println("outputLoop: mi sono chiuso")
+					return nil
+				}
+			case <-ctx.Done():
+				fmt.Println("outputLoop: mi sono chiuso")
+				return nil
+			}
+
+			nn := out.transform(floats, bytes)
 			_, err := out.file.Write(bytes[:nn])
 			if err != nil {
+				fmt.Println("ERRORE outputLoop: mi sono chiuso")
 				out.err <- err
-				out.closed = true
-				out.lock.Unlock()
-				break
+				out.cancel()
+				return err
+			}
+
+			if errors.Is(err, io.EOF) {
+				out.paused = true
+			} else if err != nil {
+				fmt.Println("ERRORE outputLoop: mi sono chiuso")
+				out.err <- err
+				out.cancel()
+				return err
 			}
 		}
-
-		if errors.Is(err, io.EOF) {
-			// Reached EOF, move to a "paused" state.
-			out.paused = true
-		} else if err != nil {
-			// Got some other error. Close the output and report the error.
-			out.err <- err
-			out.closed = true
-			out.lock.Unlock()
-			break
-		}
-
-		out.lock.Unlock()
 	}
-
-	_ = out.Close()
 }
 
 func (out *pipeOutput) Pause() error {
@@ -168,8 +216,11 @@ func (out *pipeOutput) DelayMs() (int64, error) {
 }
 
 func (out *pipeOutput) SetVolume(vol float32) {
-	if vol < 0 || vol > 1 {
-		panic(fmt.Sprintf("invalid volume value: %0.2f", vol))
+	if vol < 0 {
+		vol = 0
+	}
+	if vol > 1 {
+		vol = 1
 	}
 
 	out.volume = vol
@@ -182,17 +233,26 @@ func (out *pipeOutput) Error() <-chan error {
 }
 
 func (out *pipeOutput) Close() error {
+	fmt.Println("HO CHIAMATO LA FUNZIONE DI CHIUSURA!!!")
 	out.lock.Lock()
-	defer out.lock.Unlock()
-
-	if out.closed {
+	if out.cancel == nil {
+		out.lock.Unlock()
 		return nil
 	}
 
-	_ = out.file.Close()
+	out.cancel()
 
-	out.closed = true
-	out.cond.Signal()
+	out.paused = false
+	out.cond.Broadcast()
+	out.lock.Unlock()
+
+	if closer, ok := out.reader.(io.Closer); ok {
+		_ = closer.Close()
+		fmt.Println("HO CHIUSO READER DA SPOTIFY")
+	}
+
+	_ = out.file.Close()
+	fmt.Println("HO CHIUSO WRITER SU PIPE")
 
 	return nil
 }
