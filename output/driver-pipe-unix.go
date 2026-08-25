@@ -3,10 +3,13 @@
 package output
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
 	"syscall"
+
+	"golang.org/x/sync/errgroup"
 )
 
 func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
@@ -46,7 +49,20 @@ func newPipeOutput(opts *NewOutputOptions) (out *pipeOutput, err error) {
 		}
 	}
 
-	go out.outputLoop()
+	buffer_chan := make(chan []float32, 5)
+
+	var ctx context.Context
+	ctx, out.cancel = context.WithCancel(context.Background())
+
+	out.group, ctx = errgroup.WithContext(ctx)
+
+	out.group.Go(func() error {
+		return out.readerLoop(ctx, buffer_chan)
+	})
+
+	out.group.Go(func() error {
+		return out.outputLoop(ctx, buffer_chan)
+	})
 
 	return out, nil
 }
