@@ -66,6 +66,15 @@ type ApiDeviceAuth struct {
 	Url string `json:"url"`
 }
 
+// ApiInfo Static information about the player device
+type ApiInfo struct {
+	// DeviceId The player device ID
+	DeviceId string `json:"device_id"`
+
+	// Name The player device name
+	Name string `json:"name"`
+}
+
 // ApiLibraryPlaylist A playlist in the user's library
 type ApiLibraryPlaylist struct {
 	// CanEdit Whether the user may add items to the playlist, true for their own and for collaborative playlists
@@ -123,13 +132,6 @@ type ApiLikedState struct {
 type ApiLikedStates struct {
 	// Items One entry per requested URI, in request order
 	Items []ApiLikedState `json:"items"`
-// ApiInfo Static information about the player device
-type ApiInfo struct {
-	// DeviceId The player device ID
-	DeviceId string `json:"device_id"`
-
-	// Name The player device name
-	Name string `json:"name"`
 }
 
 // ApiNext A skip to next payload
@@ -463,6 +465,9 @@ type ServerInterface interface {
 	// (GET /events)
 	GetEvents(w http.ResponseWriter, r *http.Request)
 
+	// (GET /info)
+	GetInfo(w http.ResponseWriter, r *http.Request)
+
 	// (GET /library/liked)
 	GetLiked(w http.ResponseWriter, r *http.Request, params GetLikedParams)
 
@@ -480,8 +485,6 @@ type ServerInterface interface {
 
 	// (POST /library/playlists/remove_track)
 	PlaylistRemoveTrack(w http.ResponseWriter, r *http.Request)
-	// (GET /info)
-	GetInfo(w http.ResponseWriter, r *http.Request)
 
 	// (POST /player/add_to_queue)
 	PlayerAddToQueue(w http.ResponseWriter, r *http.Request)
@@ -614,6 +617,20 @@ func (siw *ServerInterfaceWrapper) GetEvents(w http.ResponseWriter, r *http.Requ
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.GetEvents(w, r)
+	}))
+
+	for _, middleware := range siw.HandlerMiddlewares {
+		handler = middleware(handler)
+	}
+
+	handler.ServeHTTP(w, r)
+}
+
+// GetInfo operation middleware
+func (siw *ServerInterfaceWrapper) GetInfo(w http.ResponseWriter, r *http.Request) {
+
+	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		siw.Handler.GetInfo(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -774,11 +791,6 @@ func (siw *ServerInterfaceWrapper) PlaylistRemoveTrack(w http.ResponseWriter, r 
 
 	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		siw.Handler.PlaylistRemoveTrack(w, r)
-// GetInfo operation middleware
-func (siw *ServerInterfaceWrapper) GetInfo(w http.ResponseWriter, r *http.Request) {
-
-	handler := http.Handler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		siw.Handler.GetInfo(w, r)
 	}))
 
 	for _, middleware := range siw.HandlerMiddlewares {
@@ -1164,13 +1176,13 @@ func HandlerWithOptions(si ServerInterface, options StdHTTPServerOptions) http.H
 	m.HandleFunc("GET "+options.BaseURL+"/auth/code", wrapper.GetAuthCode)
 	m.HandleFunc("GET "+options.BaseURL+"/context/tracks", wrapper.GetContextTracks)
 	m.HandleFunc("GET "+options.BaseURL+"/events", wrapper.GetEvents)
+	m.HandleFunc("GET "+options.BaseURL+"/info", wrapper.GetInfo)
 	m.HandleFunc("GET "+options.BaseURL+"/library/liked", wrapper.GetLiked)
 	m.HandleFunc("POST "+options.BaseURL+"/library/liked", wrapper.SetLiked)
 	m.HandleFunc("GET "+options.BaseURL+"/library/playlists", wrapper.GetLibraryPlaylists)
 	m.HandleFunc("POST "+options.BaseURL+"/library/playlists/add_tracks", wrapper.PlaylistAddTracks)
 	m.HandleFunc("GET "+options.BaseURL+"/library/playlists/contains", wrapper.PlaylistContains)
 	m.HandleFunc("POST "+options.BaseURL+"/library/playlists/remove_track", wrapper.PlaylistRemoveTrack)
-	m.HandleFunc("GET "+options.BaseURL+"/info", wrapper.GetInfo)
 	m.HandleFunc("POST "+options.BaseURL+"/player/add_to_queue", wrapper.PlayerAddToQueue)
 	m.HandleFunc("POST "+options.BaseURL+"/player/next", wrapper.PlayerNext)
 	m.HandleFunc("POST "+options.BaseURL+"/player/output", wrapper.PlayerOutput)
